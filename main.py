@@ -5,6 +5,7 @@ import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+# تأكد أن هذا السطر موجود وصحيح
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright 
 
@@ -176,6 +177,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         
         # --- الجزء المبتكر: استخدام Playwright للتجاوز الأمني ---
         try:
+            # تأكد أن هذه الكتلة تبدأ بنفس المسافة البادئة (4 مسافات)
             async with async_playwright() as p:
                 browser = await p.chromium.launch()
                 page = await browser.new_page()
@@ -211,7 +213,8 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                         text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
                     )
             
-            # تم التأكد من تركيب هذه الكتلة بشكل صحيح لتفادي SyntaxError
+            # هذا هو السطر الحساس (كان يظهر في السطر 215/218 لديك). 
+            # تأكد من عدم وجود مسافات بادئة إضافية قبله!
             except Exception as e:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
