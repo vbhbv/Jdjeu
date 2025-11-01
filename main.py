@@ -7,21 +7,25 @@ from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --- إعدادات Google CSE ---
+# --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") # مفتاح API
-GOOGLE_CX = os.getenv("GOOGLE_CX")           # معرّف محرك البحث المخصص (CX)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") 
+GOOGLE_CX = os.getenv("GOOGLE_CX")           
 SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
-# --- دوال مساعدة للشبكة (Utility Functions) ---
+# --- دالة مساعدة مع User-Agent ---
+USER_AGENT_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+
 
 async def fetch_json(session: ClientSession, url: str, params=None):
+    # لا نحتاج User-Agent لـ Google API نفسه
     async with session.get(url, params=params, timeout=20) as resp:
         resp.raise_for_status()
         return await resp.json()
 
 async def fetch_html(session: ClientSession, url: str):
-    async with session.get(url, timeout=20) as resp:
+    """جلب HTML مع User-Agent لتجاوز حظر الخوادم (403)."""
+    async with session.get(url, headers=USER_AGENT_HEADER, timeout=20) as resp:
         resp.raise_for_status()
         return await resp.text()
 
@@ -30,6 +34,7 @@ async def fetch_html(session: ClientSession, url: str):
 async def search_google_cse(session: ClientSession, query: str):
     """يبحث في محرك Google المخصص ويعيد النتائج."""
     if not GOOGLE_API_KEY or not GOOGLE_CX:
+        # هذه هي رسالة الخطأ التي ظهرت لك سابقاً
         raise ValueError("Google API Key or CX is missing in environment variables.")
         
     params = {
@@ -38,12 +43,10 @@ async def search_google_cse(session: ClientSession, query: str):
         "key": GOOGLE_API_KEY
     }
     
-    # استدعاء Google Custom Search API
     data = await fetch_json(session, SEARCH_URL, params=params)
     
     results = []
-    # Google API يعيد قائمة بالنتائج في المفتاح "items"
-    for item in data.get("items", [])[:5]: # نقتصر على أول 5 نتائج
+    for item in data.get("items", [])[:5]:
         title = item.get("title")
         link = item.get("link")
         
@@ -53,12 +56,47 @@ async def search_google_cse(session: ClientSession, query: str):
 
     return results
 
+# --- دالة التحميل والإرسال والحذف (مُحسّنة) ---
+async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
+    """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
+    tmp_dir = tempfile.gettempdir()
+    file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
+    
+    async with ClientSession() as session:
+        # استخدام User-Agent لتجاوز حظر التحميل
+        async with session.get(pdf_url, headers=USER_AGENT_HEADER) as resp:
+            if resp.status != 200:
+                await context.bot.send_message(
+                    chat_id=chat_id, 
+                    text=f"⚠️ لم أتمكن من تحميل الملف من المصدر. رمز الخطأ: {resp.status}"
+                )
+                return
+            
+            # كتابة الملف بشكل غير متزامن
+            async with aiofiles.open(file_path, "wb") as f:
+                await f.write(await resp.read())
+            
+            # إرسال الملف ومسحه (الجزء الأهم لضمان المسح)
+            try:
+                # إرسال الملف (يجب فتحه للقراءة الثنائية)
+                await context.bot.send_document(
+                    chat_id=chat_id, 
+                    document=open(file_path, "rb")
+                )
+                await context.bot.send_message(chat_id=chat_id, text="✅ تم إرسال الكتاب بنجاح.")
+            except Exception as e:
+                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء إرسال الملف إلى تيليجرام: {e}")
+            finally:
+                # ضمان حذف الملف من النظام بعد انتهاء محاولة الإرسال
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"تم حذف الملف المؤقت: {file_path}")
+                
 # --- دوال أوامر تيليجرام (Telegram Commands) ---
 
 async def start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 مرحبًا بك في بوت تحميل الكتب!\n"
-        "البحث يتم الآن عبر Google API لضمان أفضل نتائج من كتوباتي ونور.\n\n"
         "أرسل أمر /search متبوعًا باسم الكتاب أو المؤلف.\n\n"
         "مثال:\n/search قلعة العز"
     )
@@ -73,7 +111,6 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with ClientSession() as session:
-            # استخدام دالة البحث الجديدة
             results = await search_google_cse(session, query)
 
         if not results:
@@ -82,12 +119,10 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
 
         buttons = []
         text_lines = []
-        # عرض أول 5 نتائج فقط
         for i, item in enumerate(results[:5], start=1):
             title = item.get("title")[:120]
             link = item.get("link")
             text_lines.append(f"{i}. {title}")
-            # نمرر الرابط لزر التحميل
             buttons.append([InlineKeyboardButton(f"📥 تحميل {i}", callback_data=f"dl|{link}")])
             
         reply = "\n".join(text_lines)
@@ -98,30 +133,6 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
          await msg.edit_text(f"⚠️ حدث خطأ أثناء البحث: {e}")
 
-
-async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
-    # (هذه الدالة تبقى كما هي للتحميل المباشر بعد إيجاد رابط الـ PDF النهائي)
-    async with ClientSession() as session:
-        async with session.get(pdf_url) as resp:
-            if resp.status != 200:
-                await context.bot.send_message(chat_id=chat_id, text="⚠️ لم أتمكن من تحميل الملف من المصدر.")
-                return
-
-            # تأمين مكان مؤقت لكتابة الملف
-            tmp_dir = tempfile.gettempdir()
-            file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
-            
-            # كتابة الملف بشكل غير متزامن
-            async with aiofiles.open(file_path, "wb") as f:
-                await f.write(await resp.read())
-            
-            # إرسال الملف ومسحه
-            try:
-                # يجب فتح الملف للقراءة
-                await context.bot.send_document(chat_id=chat_id, document=open(file_path, "rb"))
-            finally:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
 
 async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -134,19 +145,16 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         
         async with ClientSession() as session:
             try:
-                # جلب محتوى الصفحة التي أعادتها Google (سواء كتوباتي أو نور)
-                html = await fetch_html(session, link)
+                # نستخدم دالة fetch_html المحسّنة برأس User-Agent
+                html = await fetch_html(session, link) 
                 soup = BeautifulSoup(html, "html.parser")
                 pdf_link = None
                 
                 # البحث عن رابط PDF مباشر داخل الصفحة
                 for a in soup.select("a[href]"):
                     href = a["href"]
-                    # بحث عن رابط ينتهي بـ .pdf
                     if href.lower().endswith(".pdf") or "download" in href.lower():
-                        # يجب التأكد من أنه رابط كامل
                         if href.startswith("/"):
-                            # إنشاء الرابط الكامل (مثال: kotobati.com/...)
                             from urllib.parse import urljoin
                             pdf_link = urljoin(link, href)
                         else:
@@ -161,6 +169,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                         text=f"📄 لم أجد رابط PDF مباشر داخل الصفحة. هذا هو رابط المصدر:\n{link}",
                     )
             except Exception as e:
+                # سيعرض هذا الخطأ إذا فشل جلب HTML للصفحة نفسها (مثل 403)
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=f"⚠️ حدث خطأ أثناء جلب الملف من المصدر: {e}",
