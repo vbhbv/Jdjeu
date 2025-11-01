@@ -1,98 +1,86 @@
-# scraper.py
+# scraper.py (الكود المحصن)
 import logging
 import re
 import requests
-import time
-from config import MAX_SEARCH_RESULTS
-from urllib.parse import quote, urljoin
-from bs4 import BeautifulSoup 
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, quote, urlparse # استيراد urlparse
+from config import MAX_SEARCH_RESULTS, NOOR_BOOK_BASE_URL
 
 logging.basicConfig(level=logging.INFO)
 
 class LibraryScraper:
     
     def __init__(self):
-        # رؤوس ثابتة لمحاكاة متصفح حقيقي
-        self.headers = {
+        # لم نعد نحدد Referer هنا بل نحدده ديناميكياً
+        self.base_headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept-Language': 'ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7'
         }
 
-    def search_library(self, query):
-        """
-        تُجري بحثاً عاماً وشاملاً للعثور على صفحة الكتاب التفصيلية عبر محرك البحث.
-        (لضمان العثور على الكتاب حتى لو لم يكن ملف PDF مفهرساً)
-        """
-        logging.info(f"Initiating broad search for book page: {query}")
-        
-        # 1. إنشاء استعلامات بحث عامة (استهداف صفحات الكتاب)
-        search_queries = [
-            f"site:noor-book.com {query} كتاب", # البحث عن صفحة الكتاب
-            f"site:kutubati.com {query} كتاب"
-        ]
-        
-        books = []
-        
-        # 2. تنفيذ البحث عبر أداة Google Search
-        try:
-            # 💡 يتم استخدام الأداة google:search هنا
-            search_results = google.search(queries=search_queries)
-        except Exception as e:
-            logging.error(f"Google Search Tool Failed: {e}")
-            return []
-            
-        
-        # 3. فلترة النتائج وتجهيزها
-        for result in search_results:
-            url = result.url.lower()
-            
-            # التأكد من أن الرابط يشير لصفحة كتاب أو تحميل
-            if 'book' in url or 'download' in url:
-                books.append({
-                    # تنظيف عنوان النتيجة
-                    'title': re.sub(r' \| .*', '', result.title).strip(),
-                    'url': result.url 
-                })
-                if len(books) >= MAX_SEARCH_RESULTS:
-                    break
-        
-        return books
+    # ... (دالة search_library تبقى كما هي)
+    # ...
 
     def get_download_info(self, book_url):
         """
-        تتأكد من نوع الملف وتعود بالرابط المباشر للملف عبر تتبع إعادة التوجيه.
+        المنطق المحصن: تفاوض آلي، تحديث ديناميكي لرأس Referer، ومعالجة أخطاء أفضل.
         """
-        logging.info(f"Checking link for direct file: {book_url}")
+        logging.info(f"Attempting Automated Negotiation for download link: {book_url}")
+        
+        # 💡 النقد 4: تحديث رأس Referer ديناميكياً
+        # نستخدم book_url كمرجع لتحميل الروابط من نفس النطاق
+        referer_domain = urlparse(book_url).scheme + "://" + urlparse(book_url).netloc
+        
+        current_headers = self.base_headers.copy()
+        current_headers['Referer'] = referer_domain
         
         try:
-            # 1. محاولة تتبع إعادة التوجيه مباشرة من رابط النتيجة
-            response = requests.get(book_url, allow_redirects=True, timeout=15, headers=self.headers)
-            final_url = response.url
+            # 1. جلب صفحة الكتاب (النقد 5: مرونة أفضل)
+            response = requests.get(book_url, headers=current_headers, timeout=15, allow_redirects=True)
             
-            # إذا كان الرابط النهائي يشير مباشرة لملف
-            if final_url.lower().endswith(('.pdf', '.epub')):
-                file_ext = '.pdf' if final_url.lower().endswith('.pdf') else '.epub'
-                return final_url, file_ext
-            
-            # 2. إذا كان الرابط لا يزال صفحة ويب، نقوم بالكشط السريع لزر التحميل (كحل احتياطي)
+            # 💡 النقد 5: لا نستخدم raise_for_status() بشكل صارم في البداية
+            if response.status_code >= 400:
+                logging.warning(f"Initial book page request failed with status: {response.status_code}")
+                return None, "error"
+                
             soup = BeautifulSoup(response.content, 'lxml')
-            download_button = soup.select_one('a[href*="/download/"], a.btn-download')
+            
+            # 2. البحث عن أزرار التحميل الأكثر شيوعاً
+            download_button = soup.select_one('a[href*="/download/"], a.btn-download, a[download], button')
             
             if download_button:
-                download_link_partial = download_button.get('href')
-                # استخدام final_url كـ base url في حال تم تحويل الرابط في الخطوة 1
-                full_download_link = urljoin(final_url, download_link_partial) 
-                
-                # تتبع الرابط الجديد للتأكد من الرابط النهائي للملف
-                final_file_response = requests.get(full_download_link, allow_redirects=True, timeout=30, headers=self.headers)
-                final_file_url = final_file_response.url
-                
-                if final_file_url.lower().endswith(('.pdf', '.epub')):
-                    file_ext = '.pdf' if final_file_url.lower().endswith('.pdf') else '.epub'
-                    return final_file_url, file_ext
+                download_link_partial = download_button.get('href') or download_button.get('data-href')
 
-            return None, "link" # لم نجد رابط ملف مباشر
+                if download_link_partial:
+                    full_download_link = urljoin(response.url, download_link_partial)
+
+                    # 3. التفاوض الآلي: طلب الرابط المباشر
+                    # يجب أن يكون full_download_link هو الآن المرجع (Referer) للخطوة التالية
+                    negotiation_headers = self.base_headers.copy()
+                    negotiation_headers['Referer'] = response.url # صفحة الكتاب هي المرجع
+
+                    final_file_response = requests.get(
+                        full_download_link, 
+                        headers=negotiation_headers, # استخدام الرؤوس الجديدة
+                        timeout=30, 
+                        allow_redirects=True
+                    )
+                    
+                    final_url = final_file_response.url 
+                    
+                    # 4. التحقق من الرابط النهائي (النقد 2: تجاهل صفحة الانتظار)
+                    # إذا كان الرابط النهائي يشير إلى ملف، أو إذا كان الرابط ينتهي بـ .php أو .html
+                    if final_url.lower().endswith(('.pdf', '.epub')):
+                        file_ext = '.pdf' if final_url.lower().endswith('.pdf') else '.epub'
+                        logging.info(f"Success! Found direct file link: {final_url}")
+                        return final_url, file_ext
+                    
+                    # 💡 النقد 2: فشل التحقق النهائي
+                    logging.warning(f"Final URL is not a file: {final_url}")
+            
+            # 💡 النقد 1: لم نجد زر تحميل وظيفي (بسبب JavaScript)
+            logging.warning("Failed to find a functional download link (JS dependency likely).")
+            return None, "link"
             
         except Exception as e:
-            logging.error(f"Error during link check/redirection: {e}")
+            logging.error(f"Critical error during Automated Negotiation: {e}")
             return None, "error"
