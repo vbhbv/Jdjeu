@@ -5,7 +5,6 @@ import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-# تم التأكد من وجود ContextTypes هنا
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright 
 
@@ -28,28 +27,41 @@ async def fetch_json(session: ClientSession, url: str, params=None):
         resp.raise_for_status()
         return await resp.json()
 
-async def search_google_cse(session: ClientSession, query: str):
-    """يبحث في محرك Google المخصص ويعيد النتائج."""
-    if not GOOGLE_API_KEY or not GOOGLE_CX:
-        raise ValueError("Google API Key or CX is missing in environment variables.")
-        
-    params = {
-        "q": query,
-        "cx": GOOGLE_CX,
-        "key": GOOGLE_API_KEY
-    }
+# --- دالة مساعدة جديدة لاستخلاص رابط PDF باستخدام Playwright ---
+async def get_pdf_link_from_page(link: str):
+    """يستخدم Playwright لفتح الصفحة وتشغيل JavaScript واستخلاص رابط PDF النهائي."""
+    pdf_link = None
     
-    data = await fetch_json(session, SEARCH_URL, params=params)
-    
-    results = []
-    for item in data.get("items", [])[:5]:
-        title = item.get("title")
-        link = item.get("link")
+    async with async_playwright() as p:
+        # استخدام متصفح Chrome وهمي
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
         
-        if "kotobati.com" in link or "noor-book.com" in link:
-             results.append({"title": title, "link": link})
-
-    return results
+        # الانتقال إلى رابط الكتاب وانتظار تحميل الشبكة بالكامل
+        await page.goto(link, wait_until="networkidle") 
+        
+        # جلب محتوى HTML بعد تشغيل JavaScript
+        html_content = await page.content()
+        
+        # إغلاق المتصفح الوهمي
+        await browser.close()
+        
+        # تحليل المحتوى الذي جلبه Playwright
+        soup = BeautifulSoup(html_content, "html.parser")
+        
+        # البحث عن رابط PDF مباشر
+        for a in soup.select("a[href]"):
+            href = a["href"]
+            if href.lower().endswith(".pdf") or "download" in href.lower():
+                # حل مشكلة الروابط النسبية
+                if href.startswith("/"):
+                    from urllib.parse import urljoin
+                    pdf_link = urljoin(link, href)
+                else:
+                    pdf_link = href
+                break 
+    
+    return pdf_link, soup.title.string
 
 # --- دالة التحميل والإرسال والحذف ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
@@ -173,53 +185,25 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             
         await query.edit_message_text("⏳ أستخدم متصفح وهمي لجلب رابط الملف النهائي...")
         
-        pdf_link = None
-        
-        # --- الجزء المبتكر: استخدام Playwright للتجاوز الأمني ---
+        # --- استدعاء الدالة المنفصلة (get_pdf_link_from_page) ---
         try:
-            async with async_playwright() as p:
-                # تأكد أن هذه الكتلة تبدأ بنفس المسافة البادئة (4 مسافات)
-                browser = await p.chromium.launch()
-                page = await browser.new_page()
-                
-                # الانتقال إلى رابط الكتاب وانتظار تحميل الشبكة بالكامل
-                await page.goto(link, wait_until="networkidle") 
-                
-                # جلب محتوى HTML بعد تشغيل JavaScript
-                html_content = await page.content()
-                
-                # إغلاق المتصفح الوهمي
-                await browser.close()
-                
-                # تحليل المحتوى الذي جلبه Playwright
-                soup = BeautifulSoup(html_content, "html.parser")
-                
-                # البحث عن رابط PDF مباشر
-                for a in soup.select("a[href]"):
-                    href = a["href"]
-                    if href.lower().endswith(".pdf") or "download" in href.lower():
-                        if href.startswith("/"):
-                            from urllib.parse import urljoin
-                            pdf_link = urljoin(link, href)
-                        else:
-                            pdf_link = href
-                        break 
-                
-                if pdf_link:
-                    await download_and_send_pdf(context, query.message.chat_id, pdf_link, title=soup.title.string if soup.title else "book")
-                else:
-                    await context.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
-                    )
+            pdf_link, title = await get_pdf_link_from_page(link)
             
-            # هذا هو السطر الحساس. 
-            # تأكد أن هذا السطر يحتوي على مسافة بادئة واحدة فقط (4 مسافات)
-            except Exception as e:
+            if pdf_link:
+                await download_and_send_pdf(context, query.message.chat_id, pdf_link, title=title if title else "book")
+            else:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"⚠️ خطأ Playwright أثناء جلب الملف من المصدر: {e}",
+                    text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
                 )
+        
+        # تم تصغير هذه الكتلة، مما يقلل احتمالية خطأ SyntaxError
+        except Exception as e:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"⚠️ خطأ Playwright أثناء جلب الملف من المصدر: {e}",
+            )
+
 
 def main():
     if not BOT_TOKEN:
