@@ -36,16 +36,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = scraper.search_library(query)
         
         if not results:
-            await update.message.reply_text(f"عذراً، لم يتم العثور على نتائج لـ `{query}`.", parse_mode='Markdown')
+            await update.message.reply_text(
+                f"عذراً، لم يتم العثور على نتائج لـ `{query}`. يرجى التأكد من أن اسم الكتاب صحيح وأن موقع المكتبة يعمل." , 
+                parse_mode='Markdown'
+            )
             return
 
-        book_list_text = f"📚 نتائج البحث ({len(results)} نتائج):\n\n"
+        book_list_text = f"📚 نتائج البحث ({len(results)} نتائج):\n"
         keyboard = []
         
         for i, book in enumerate(results):
+            book_list_text += f"\n**{i + 1}. {book['title']}**"
             # نستخدم رابط الكتاب كمعرف في الـ Callback
             book_id_callback = f"download_{book['url']}" 
-            book_list_text += f"**{i + 1}. {book['title']}**\n"
             keyboard.append([InlineKeyboardButton(f"⬇️ تحميل {i + 1}", callback_data=book_id_callback)])
             
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -58,7 +61,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logging.error(f"Search operation failed: {e}")
-        await update.message.reply_text("❌ حدث خطأ أثناء عملية البحث.")
+        await update.message.reply_text("❌ حدث خطأ غير متوقع أثناء عملية البحث. يرجى المحاولة لاحقاً.")
 
 # 3. دالة التعامل مع طلب التحميل والحذف الفوري
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,7 +84,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query_callback.message.reply_text("⏳ جاري تحميل الملف مؤقتاً على السيرفر، يرجى الانتظار...")
         
         # إنشاء اسم ملف مؤقت بختم زمني فريد
-        temp_file_name = f"temp_book_{os.path.basename(book_url)}_{time.time()}{file_ext}"
+        temp_file_name = f"temp_book_{os.path.basename(book_url).split('?')[0]}_{time.time()}{file_ext}"
         
         try:
             # 2. تحميل الملف مؤقتاً على القرص الصلب
@@ -96,7 +99,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(temp_file_name, 'rb') as doc_file:
                 await query_callback.message.reply_document(
                     document=doc_file,
-                    caption=f"✅ تم تحميل الكتاب جاهزاً.",
+                    caption="✅ تم تحميل الكتاب بنجاح. (تم حذف الملف من السيرفر بعد الإرسال)",
                     parse_mode='Markdown'
                 )
 
@@ -110,7 +113,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query_callback.message.reply_text("❌ فشل تحميل الملف. تأكد من أن الرابط صالح أو أن حجم الملف ليس ضخماً.")
         except Exception as e:
             logging.error(f"General error: {e}")
-            await query_callback.message.reply_text("❌ حدث خطأ غير متوقع.")
+            await query_callback.message.reply_text("❌ حدث خطأ غير متوقع. جرب مرة أخرى.")
         finally:
             # تنظيف أي ملفات متبقية حتى في حالة وجود خطأ
             if os.path.exists(temp_file_name):
