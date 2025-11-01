@@ -1,12 +1,11 @@
 # config.py
 
-# 1. رمز بوت تليجرام (Telegram Bot Token)
-# تم تحديثه بالرمز الجديد الذي أرسلته
+# 1. بيانات البوت (لتبقى كمرجع)
 TELEGRAM_BOT_TOKEN = "7176379503:AAFdo257wapb4wJntAk_axaoGBuFdQP617w"
 
-# 2. إعدادات أخرى
-MAX_SEARCH_RESULTS = 5 
+# 2. بيانات حساب المستخدم (Telethon) - القوة الدافعة للبحث
+API_ID = 26597373
+API_HASH = "03b65897b8dfe7b9d237fb69d687d615"
 
-# 3. الروابط الأساسية للمكتبات الهدف (مكتبة النور كمثال للكشط)
-NOOR_BOOK_BASE_URL = "https://www.noor-book.com"
-NOOR_BOOK_SEARCH_URL = NOOR_BOOK_BASE_URL + "/search?query={query}"
+# 3. القناة المستهدفة
+TARGET_CHANNEL_ID = "@lovekotob" 
