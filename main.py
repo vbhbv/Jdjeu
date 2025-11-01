@@ -5,7 +5,6 @@ import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-# تم التأكد من وجود ContextTypes هنا
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright 
 
