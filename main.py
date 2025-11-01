@@ -1,105 +1,11 @@
-import os
-import asyncio
-import tempfile
-import aiofiles
-from aiohttp import ClientSession
-from bs4 import BeautifulSoup
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+# في main.py
 
-# --- إعدادات Google CSE والمفاتيح ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") 
-GOOGLE_CX = os.getenv("GOOGLE_CX")           
-SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
+# ... (كل التعريفات والدوال السابقة تبقى كما هي، بما في ذلك fetch_html و download_and_send_pdf المعدلتين بالـ User-Agent) ...
 
-# --- دالة مساعدة مع User-Agent ---
-USER_AGENT_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+# ... (نستخدم USER_DATA لتخزين الروابط بشكل مؤقت لكل مستخدم)
+# هذا يُخزن بيانات مؤقتة داخل الذاكرة (Memory) للبوت
+TEMP_LINKS_KEY = "current_search_links" 
 
-
-async def fetch_json(session: ClientSession, url: str, params=None):
-    # لا نحتاج User-Agent لـ Google API نفسه
-    async with session.get(url, params=params, timeout=20) as resp:
-        resp.raise_for_status()
-        return await resp.json()
-
-async def fetch_html(session: ClientSession, url: str):
-    """جلب HTML مع User-Agent لتجاوز حظر الخوادم (403)."""
-    async with session.get(url, headers=USER_AGENT_HEADER, timeout=20) as resp:
-        resp.raise_for_status()
-        return await resp.text()
-
-# --- دالة البحث الرئيسية باستخدام Google CSE ---
-
-async def search_google_cse(session: ClientSession, query: str):
-    """يبحث في محرك Google المخصص ويعيد النتائج."""
-    if not GOOGLE_API_KEY or not GOOGLE_CX:
-        # هذه هي رسالة الخطأ التي ظهرت لك سابقاً
-        raise ValueError("Google API Key or CX is missing in environment variables.")
-        
-    params = {
-        "q": query,
-        "cx": GOOGLE_CX,
-        "key": GOOGLE_API_KEY
-    }
-    
-    data = await fetch_json(session, SEARCH_URL, params=params)
-    
-    results = []
-    for item in data.get("items", [])[:5]:
-        title = item.get("title")
-        link = item.get("link")
-        
-        # التأكد من أن الرابط من أحد المصادر الموثوقة (اختياري لكن جيد للأمان)
-        if "kotobati.com" in link or "noor-book.com" in link:
-             results.append({"title": title, "link": link})
-
-    return results
-
-# --- دالة التحميل والإرسال والحذف (مُحسّنة) ---
-async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
-    """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
-    tmp_dir = tempfile.gettempdir()
-    file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
-    
-    async with ClientSession() as session:
-        # استخدام User-Agent لتجاوز حظر التحميل
-        async with session.get(pdf_url, headers=USER_AGENT_HEADER) as resp:
-            if resp.status != 200:
-                await context.bot.send_message(
-                    chat_id=chat_id, 
-                    text=f"⚠️ لم أتمكن من تحميل الملف من المصدر. رمز الخطأ: {resp.status}"
-                )
-                return
-            
-            # كتابة الملف بشكل غير متزامن
-            async with aiofiles.open(file_path, "wb") as f:
-                await f.write(await resp.read())
-            
-            # إرسال الملف ومسحه (الجزء الأهم لضمان المسح)
-            try:
-                # إرسال الملف (يجب فتحه للقراءة الثنائية)
-                await context.bot.send_document(
-                    chat_id=chat_id, 
-                    document=open(file_path, "rb")
-                )
-                await context.bot.send_message(chat_id=chat_id, text="✅ تم إرسال الكتاب بنجاح.")
-            except Exception as e:
-                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء إرسال الملف إلى تيليجرام: {e}")
-            finally:
-                # ضمان حذف الملف من النظام بعد انتهاء محاولة الإرسال
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    print(f"تم حذف الملف المؤقت: {file_path}")
-                
-# --- دوال أوامر تيليجرام (Telegram Commands) ---
-
-async def start(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 مرحبًا بك في بوت تحميل الكتب!\n"
-        "أرسل أمر /search متبوعًا باسم الكتاب أو المؤلف.\n\n"
-        "مثال:\n/search قلعة العز"
-    )
 
 async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
@@ -119,11 +25,18 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
 
         buttons = []
         text_lines = []
-        for i, item in enumerate(results[:5], start=1):
+        
+        # --- التعديل هنا: تخزين الروابط في context.user_data ---
+        
+        # حفظ قائمة الروابط الكاملة مؤقتاً في بيانات المستخدم
+        context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results[:5]]
+        
+        # عرض أول 5 نتائج
+        for i, item in enumerate(results[:5], start=0): # البدء من الفهرس 0
             title = item.get("title")[:120]
-            link = item.get("link")
-            text_lines.append(f"{i}. {title}")
-            buttons.append([InlineKeyboardButton(f"📥 تحميل {i}", callback_data=f"dl|{link}")])
+            # نستخدم i كفهرس (رقم قصير) بدلاً من الرابط الطويل
+            text_lines.append(f"{i+1}. {title}")
+            buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
             
         reply = "\n".join(text_lines)
         await msg.edit_text(reply, reply_markup=InlineKeyboardMarkup(buttons))
@@ -140,12 +53,35 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data.startswith("dl|"):
-        link = data.split("|", 1)[1]
+        try:
+            # --- التعديل هنا: استرجاع الرابط من context.user_data ---
+            index_str = data.split("|", 1)[1] # نجلب الفهرس (0، 1، 2، إلخ)
+            index = int(index_str)
+            
+            # التأكد من وجود الروابط المخزنة
+            if TEMP_LINKS_KEY not in context.user_data or index >= len(context.user_data[TEMP_LINKS_KEY]):
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="❌ انتهت صلاحية رابط التحميل أو لم يعد موجودًا. يرجى البحث مجدداً.",
+                )
+                return
+
+            # جلب الرابط الكامل من القائمة المخزنة
+            link = context.user_data[TEMP_LINKS_KEY][index]
+
+        except Exception:
+            # معالجة الخطأ الذي ظهر لك: Button_data_invalid
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="⚠️ حدث خطأ أثناء معالجة زر التحميل (رابط غير صالح). يرجى البحث مجدداً.",
+            )
+            return
+            
         await query.edit_message_text("⏳ أبحث عن رابط ملف PDF داخل صفحة المصدر...")
         
         async with ClientSession() as session:
             try:
-                # نستخدم دالة fetch_html المحسّنة برأس User-Agent
+                # ... (باقي كود جلب وتحليل HTML يبقى كما هو) ...
                 html = await fetch_html(session, link) 
                 soup = BeautifulSoup(html, "html.parser")
                 pdf_link = None
@@ -169,24 +105,10 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                         text=f"📄 لم أجد رابط PDF مباشر داخل الصفحة. هذا هو رابط المصدر:\n{link}",
                     )
             except Exception as e:
-                # سيعرض هذا الخطأ إذا فشل جلب HTML للصفحة نفسها (مثل 403)
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=f"⚠️ حدث خطأ أثناء جلب الملف من المصدر: {e}",
                 )
 
-def main():
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN is missing in environment variables.")
+# ... (دالة main تبقى كما هي) ...
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("search", search_cmd))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-
-    print("البوت بدأ العمل... اضغط Ctrl+C للإيقاف.")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
