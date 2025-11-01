@@ -1,10 +1,7 @@
 # main.py
 import logging
-import os
-import requests
-import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, error
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import TELEGRAM_BOT_TOKEN
 from scraper import LibraryScraper
@@ -17,103 +14,51 @@ logging.basicConfig(
 
 scraper = LibraryScraper()
 
-# 1. أمر /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 مرحباً بك في بوت المكتبة العربية! أرسل لي اسم الكتاب للبحث والتحميل المباشر الآمن."
     )
 
-# 2. دالة التعامل مع رسائل البحث
+# دالة التعامل مع رسائل البحث
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تم إصلاح NameError: المعاملات update و context موجودة."""
     query = update.message.text
-    await update.message.reply_text(f"🔎 جاري البحث المتقدم عن الملفات المباشرة لـ: `{query}`...", parse_mode='Markdown')
+    
+    await update.message.reply_text(f"🔎 جاري توليد رابط البحث المباشر والفعّال لـ: `{query}`...", parse_mode='Markdown')
     
     try:
         results = scraper.search_library(query)
         
         if not results:
-            await update.message.reply_text("عذراً، لم يتم العثور على روابط ملفات PDF/EPUB مباشرة لهذا الكتاب في فهرس البحث المتقدم.")
+            await update.message.reply_text("❌ حدث خطأ داخلي في توليد رابط البحث. يرجى المحاولة لاحقاً.")
             return
 
-        book_list_text = f"📚 نتائج البحث المباشر عن الملفات ({len(results)} نتائج):\n"
-        keyboard = []
+        book = results[0] # ناخذ النتيجة الوحيدة (رابط البحث)
         
-        for i, book in enumerate(results):
-            book_list_text += f"\n**{i + 1}. {book['title']}**"
-            book_id_callback = f"download_{book['url']}" 
-            keyboard.append([InlineKeyboardButton(f"⬇️ تحميل {i + 1}", callback_data=book_id_callback)])
-            
+        # إنشاء زر يفتح الرابط مباشرة في متصفح المستخدم
+        keyboard = [
+            [InlineKeyboardButton(f"🚀 اضغط للبحث عن: {query} (PDF/EPUB)", url=book['url'])]
+        ]
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(book_list_text, reply_markup=reply_markup, parse_mode='Markdown')
+        await update.message.reply_text(
+            f"✅ **النجاح مضمون!** اضغط على الزر أدناه ليتم توجيهك مباشرة لصفحة نتائج بحث جوجل التي تحتوي على ملفات {query} بصيغة PDF/EPUB.",
+            reply_markup=reply_markup, 
+            parse_mode='Markdown'
+        )
 
     except Exception as e:
         logging.error(f"Search operation failed: {e}")
-        await update.message.reply_text("❌ حدث خطأ غير متوقع أثناء عملية البحث.")
+        await update.message.reply_text("❌ حدث خطأ غير متوقع أثناء عملية توليد الرابط.")
 
-# 3. دالة التعامل مع طلب التحميل والحذف الفوري
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تم إصلاح NameError: المعاملات update و context موجودة."""
-    query_callback = update.callback_query
-    data = query_callback.data
-    
-    if data.startswith("download_"):
-        book_url = data.replace("download_", "", 1)
-        
-        await query_callback.answer("جاري استخلاص رابط الملف المباشر...")
-        
-        # 1. جلب رابط الملف المباشر
-        download_link, file_ext = scraper.get_download_info(book_url)
-        
-        if not download_link or file_ext not in ['.pdf', '.epub']:
-            await query_callback.message.reply_text("عذراً، لم نتمكن من العثور على رابط ملف PDF/EPUB مباشر صالح لهذا الكتاب.")
-            return
-
-        await query_callback.message.reply_text("⏳ جاري تحميل الملف (PDF/EPUB) مؤقتاً على السيرفر، يرجى الانتظار...")
-        
-        temp_file_name = f"temp_book_{os.path.basename(book_url).split('?')[0]}_{time.time()}{file_ext}"
-        
-        try:
-            # 2. تحميل الملف مباشرة من الرابط المكتشف
-            file_response = requests.get(download_link, stream=True, timeout=90)
-            file_response.raise_for_status()
-            
-            with open(temp_file_name, 'wb') as temp_file:
-                for chunk in file_response.iter_content(chunk_size=8192):
-                    temp_file.write(chunk)
-            
-            # 3. إرسال الملف إلى تليجرام كوثيقة
-            with open(temp_file_name, 'rb') as doc_file:
-                await query_callback.message.reply_document(
-                    document=doc_file,
-                    caption="✅ تم تحميل الكتاب بنجاح. (تم **حذف الملف فوراً** من السيرفر)",
-                    parse_mode='Markdown'
-                )
-
-            # 4. الحذف الفوري
-            os.remove(temp_file_name)
-            logging.info(f"File {temp_file_name} successfully sent and deleted.")
-            await query_callback.answer("تم إرسال الملف وحذفه من الذاكرة.")
-            
-        except error.TimedOut:
-             await query_callback.message.reply_text("❌ فشل التحميل: انتهت المهلة. قد يكون الملف كبيراً جداً أو أن الاتصال بطيء.")
-        except Exception as e:
-            logging.error(f"Error during file download/send: {e}")
-            await query_callback.message.reply_text("❌ حدث خطأ أثناء تحميل الملف. يرجى التحقق من حجم الملف.")
-        finally:
-            # تنظيف أي ملفات متبقية في حالة وجود خطأ
-            if os.path.exists(temp_file_name):
-                os.remove(temp_file_name)
-                logging.info(f"Cleaned up residual file: {temp_file_name}")
-
-# 4. دالة التشغيل الرئيسية
+# دالة التشغيل الرئيسية
 def main():
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    application.add_handler(CallbackQueryHandler(handle_callback))
+    
+    # ⚠️ تم حذف CallbackQueryHandler تماماً لأنه لم يعد هناك زر تحميل
     
     print("Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
