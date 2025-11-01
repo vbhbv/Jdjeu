@@ -5,8 +5,8 @@ import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-# تم إضافة ContextTypes هنا لتصحيح الخطأ!
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
+from playwright.async_api import async_playwright # الاستيراد الجديد لمواجهة الحماية
 
 # --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -22,17 +22,10 @@ TEMP_LINKS_KEY = "current_search_links"
 # --- دوال مساعدة للشبكة (Utility Functions) ---
 
 async def fetch_json(session: ClientSession, url: str, params=None):
+    """جلب بيانات JSON (تستخدم لاستدعاء Google API)."""
     async with session.get(url, params=params, timeout=20) as resp:
         resp.raise_for_status()
         return await resp.json()
-
-async def fetch_html(session: ClientSession, url: str):
-    """جلب HTML مع User-Agent لتجاوز حظر الخوادم (403)."""
-    async with session.get(url, headers=USER_AGENT_HEADER, timeout=20) as resp:
-        resp.raise_for_status()
-        return await resp.text()
-
-# --- دالة البحث الرئيسية باستخدام Google CSE ---
 
 async def search_google_cse(session: ClientSession, query: str):
     """يبحث في محرك Google المخصص ويعيد النتائج."""
@@ -52,13 +45,12 @@ async def search_google_cse(session: ClientSession, query: str):
         title = item.get("title")
         link = item.get("link")
         
-        # التأكد من أن الرابط من أحد المصادر الموثوقة (اختياري لكن جيد للأمان)
         if "kotobati.com" in link or "noor-book.com" in link:
              results.append({"title": title, "link": link})
 
     return results
 
-# --- دالة التحميل والإرسال والحذف (مُحسّنة) ---
+# --- دالة التحميل والإرسال والحذف ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     tmp_dir = tempfile.gettempdir()
@@ -77,7 +69,7 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
             # قراءة محتوى الاستجابة
             content = await resp.read()
 
-            # التحقق من حجم المحتوى (حل مشكلة الملفات الفارغة)
+            # التحقق من حجم المحتوى (لمنع الملفات الفارغة/التالفة)
             if len(content) < MIN_PDF_SIZE_BYTES:
                 await context.bot.send_message(
                     chat_id=chat_id, 
@@ -133,13 +125,12 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         buttons = []
         text_lines = []
         
-        # حفظ قائمة الروابط الكاملة مؤقتاً في بيانات المستخدم لحل مشكلة Button_data_invalid
+        # حفظ قائمة الروابط الكاملة مؤقتاً لحل مشكلة Button_data_invalid
         context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results[:5]]
         
         # عرض أول 5 نتائج
-        for i, item in enumerate(results[:5], start=0): # البدء من الفهرس 0
+        for i, item in enumerate(results[:5], start=0):
             title = item.get("title")[:120]
-            # نستخدم i كفهرس (رقم قصير) بدلاً من الرابط الطويل
             text_lines.append(f"{i+1}. {title}")
             buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
             
@@ -163,7 +154,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             index_str = data.split("|", 1)[1]
             index = int(index_str)
             
-            # التحقق من وجود الروابط المخزنة
             if TEMP_LINKS_KEY not in context.user_data or index >= len(context.user_data[TEMP_LINKS_KEY]):
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
@@ -171,27 +161,38 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # جلب الرابط الكامل من القائمة المخزنة
             link = context.user_data[TEMP_LINKS_KEY][index]
 
         except Exception:
-            # معالجة خطأ Button_data_invalid
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="⚠️ حدث خطأ أثناء معالجة زر التحميل (رابط غير صالح). يرجى البحث مجدداً.",
             )
             return
             
-        await query.edit_message_text("⏳ أبحث عن رابط ملف PDF داخل صفحة المصدر...")
+        await query.edit_message_text("⏳ أستخدم متصفح وهمي لجلب رابط الملف النهائي...")
         
-        async with ClientSession() as session:
-            try:
-                # نستخدم دالة fetch_html المحسّنة برأس User-Agent
-                html = await fetch_html(session, link) 
-                soup = BeautifulSoup(html, "html.parser")
-                pdf_link = None
+        pdf_link = None
+        
+        # --- الجزء المبتكر: استخدام Playwright للتجاوز الأمني ---
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch()
+                page = await browser.new_page()
                 
-                # البحث عن رابط PDF مباشر داخل الصفحة
+                # الانتقال إلى رابط الكتاب وانتظار تحميل الشبكة بالكامل
+                await page.goto(link, wait_until="networkidle") 
+                
+                # جلب محتوى HTML بعد تشغيل JavaScript
+                html_content = await page.content()
+                
+                # إغلاق المتصفح الوهمي
+                await browser.close()
+                
+                # تحليل المحتوى الذي جلبه Playwright
+                soup = BeautifulSoup(html_content, "html.parser")
+                
+                # البحث عن رابط PDF مباشر
                 for a in soup.select("a[href]"):
                     href = a["href"]
                     if href.lower().endswith(".pdf") or "download" in href.lower():
@@ -201,25 +202,25 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                         else:
                             pdf_link = href
                         break 
-                        
+                
                 if pdf_link:
                     await download_and_send_pdf(context, query.message.chat_id, pdf_link, title=soup.title.string if soup.title else "book")
                 else:
                     await context.bot.send_message(
                         chat_id=query.message.chat_id,
-                        text=f"📄 لم أجد رابط PDF مباشر داخل الصفحة. هذا هو رابط المصدر:\n{link}",
+                        text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
                     )
+            
             except Exception as e:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"⚠️ حدث خطأ أثناء جلب الملف من المصدر: {e}",
+                    text=f"⚠️ خطأ Playwright أثناء جلب الملف من المصدر: {e}",
                 )
 
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing in environment variables.")
 
-    # تأكد من استيراد ContextTypes في الأعلى!
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
