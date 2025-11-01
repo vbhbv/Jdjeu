@@ -5,8 +5,9 @@ import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+# تم التأكد من وجود ContextTypes هنا
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
-from playwright.async_api import async_playwright # الاستيراد الجديد لمواجهة الحماية
+from playwright.async_api import async_playwright 
 
 # --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -211,6 +212,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                         text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
                     )
             
+            # تم التأكد من تركيب هذه الكتلة بشكل صحيح لتفادي SyntaxError
             except Exception as e:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
