@@ -1,1 +1,4 @@
-telethon
+python-telegram-bot==20.8
+aiohttp
+aiofiles
+beautifulsoup4
