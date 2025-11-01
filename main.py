@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright 
+from urllib.parse import urljoin # تم إضافته هنا لتجنب الاستدعاء داخل حلقة
 
 # --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -27,7 +28,30 @@ async def fetch_json(session: ClientSession, url: str, params=None):
         resp.raise_for_status()
         return await resp.json()
 
-# --- دالة مساعدة جديدة لاستخلاص رابط PDF باستخدام Playwright ---
+async def search_google_cse(session: ClientSession, query: str):
+    """يبحث في محرك Google المخصص ويعيد النتائج."""
+    if not GOOGLE_API_KEY or not GOOGLE_CX:
+        raise ValueError("Google API Key or CX is missing in environment variables.")
+        
+    params = {
+        "q": query,
+        "cx": GOOGLE_CX,
+        "key": GOOGLE_API_KEY
+    }
+    
+    data = await fetch_json(session, SEARCH_URL, params=params)
+    
+    results = []
+    for item in data.get("items", [])[:5]:
+        title = item.get("title")
+        link = item.get("link")
+        
+        if "kotobati.com" in link or "noor-book.com" in link:
+             results.append({"title": title, "link": link})
+
+    return results
+
+# --- دالة مساعدة جديدة لاستخلاص رابط PDF باستخدام Playwright (الحل ضد الملف الفارغ) ---
 async def get_pdf_link_from_page(link: str):
     """يستخدم Playwright لفتح الصفحة وتشغيل JavaScript واستخلاص رابط PDF النهائي."""
     pdf_link = None
@@ -55,7 +79,6 @@ async def get_pdf_link_from_page(link: str):
             if href.lower().endswith(".pdf") or "download" in href.lower():
                 # حل مشكلة الروابط النسبية
                 if href.startswith("/"):
-                    from urllib.parse import urljoin
                     pdf_link = urljoin(link, href)
                 else:
                     pdf_link = href
@@ -129,7 +152,7 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with ClientSession() as session:
-            results = await search_google_cse(session, query)
+            results = await search_google_cse(session, query) # تم التأكد من وجود الدالة
 
         if not results:
             await msg.edit_text("❌ لم أجد نتائج. حاول بكلمات مختلفة.")
@@ -185,7 +208,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             
         await query.edit_message_text("⏳ أستخدم متصفح وهمي لجلب رابط الملف النهائي...")
         
-        # --- استدعاء الدالة المنفصلة (get_pdf_link_from_page) ---
+        # --- استدعاء الدالة المنفصلة ---
         try:
             pdf_link, title = await get_pdf_link_from_page(link)
             
@@ -197,7 +220,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
                 )
         
-        # تم تصغير هذه الكتلة، مما يقلل احتمالية خطأ SyntaxError
         except Exception as e:
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
