@@ -1,14 +1,17 @@
 # scraper.py
 import logging
 import re
+import requests
 import time
 from config import MAX_SEARCH_RESULTS
+from urllib.parse import quote
+
+# ⚠️ ملاحظة: هذا الملف يعتمد الآن على الأداة google:search المتاحة لي
+# إذا كنت لا تستخدم هذه الأداة، يجب استبدالها بـ Google Custom Search API أو أي خدمة بحث أخرى.
 
 logging.basicConfig(level=logging.INFO)
 
 class LibraryScraper:
-    
-    # لم يعد هناك حاجة لمتغيرات requests أو BeautifulSoup
     
     def search_library(self, query):
         """
@@ -16,30 +19,31 @@ class LibraryScraper:
         """
         logging.info(f"Initiating powerful filetype search for: {query}")
         
-        # 1. البحث عن ملف PDF مباشرة داخل موقع مكتبة النور
-        queries = [
-            f"site:noor-book.com {query} filetype:pdf",
-            f"site:kutubati.com {query} filetype:pdf" # إضافة موقع آخر للتحصين
+        # 1. إنشاء استعلامات بحث موجهة لملفات PDF/EPUB داخل المواقع المستهدفة
+        search_queries = [
+            f"site:noor-book.com {query} filetype:pdf OR filetype:epub",
+            f"site:kutubati.com {query} filetype:pdf OR filetype:epub"
         ]
         
-        # استخدام أداة Google Search المتاحة لي لجلب النتائج
+        books = []
+        
+        # 2. تنفيذ البحث عبر أداة Google Search
         try:
-            # 💡 يتم تفعيل أداة google:search هنا
-            search_results = google.search(queries=queries)
+            # 💡 يتم استخدام الأداة هنا لضمان النجاح وتجاوز الحماية
+            search_results = google.search(queries=search_queries)
         except Exception as e:
             logging.error(f"Google Search Tool Failed: {e}")
             return []
             
         
-        books = []
+        # 3. فلترة النتائج وتجهيزها
         for result in search_results:
-            # 2. فلترة النتائج: التأكد من أن الرابط هو ملف PDF أو EPUB
             url = result.url.lower()
             
-            # التأكد من عدم تكرار الرابط ومن أن الرابط يشير لملف
-            if url.endswith(('.pdf', '.epub')) or 'download' in url:
+            # التأكد من أن الرابط يشير لملف
+            if url.endswith(('.pdf', '.epub')) or ('download' in url and url.endswith(('.php', '.html'))):
                 books.append({
-                    # تنظيف عنوان النتيجة من أسماء المواقع
+                    # تنظيف عنوان النتيجة
                     'title': re.sub(r' \| .*', '', result.title).strip(),
                     'url': result.url 
                 })
@@ -50,11 +54,23 @@ class LibraryScraper:
 
     def get_download_info(self, book_url):
         """
-        هذه الدالة لم تعد تحتاج إلى كشط، فهي تستقبل الرابط المباشر للملف وتمرره.
+        تتأكد من نوع الملف وتعود بالرابط المباشر. إذا لم يكن رابط ملف مباشر،
+        فإنها تحاول تتبع إعادة التوجيه لضمان الحصول على الملف (تعمل كطبقة أمان).
         """
-        if book_url.lower().endswith(('.pdf', '.epub')):
-            file_ext = '.pdf' if book_url.lower().endswith('.pdf') else '.epub'
-            return book_url, file_ext
+        logging.info(f"Checking link for direct file: {book_url}")
         
-        # إذا كان الرابط لا ينتهي بملف، يمكننا تمريره كـ 'link' والاعتماد على الكود السابق
-        return book_url, "link"
+        try:
+            # محاولة تتبع إعادة التوجيه
+            response = requests.get(book_url, allow_redirects=True, timeout=15)
+            final_url = response.url
+            
+            if final_url.lower().endswith(('.pdf', '.epub')):
+                file_ext = '.pdf' if final_url.lower().endswith('.pdf') else '.epub'
+                return final_url, file_ext
+            
+            # إذا لم ينتهِ الرابط بملف، يمكن أن نعود به كرابط
+            return book_url, "link"
+            
+        except Exception as e:
+            logging.error(f"Error during link check: {e}")
+            return None, "error"
