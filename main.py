@@ -10,15 +10,14 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from playwright.async_api import async_playwright 
 from urllib.parse import urljoin 
 
-# استيراد مكتبة Gemini AI
-from google import genai
-from google.genai import types
+# استيراد مكتبة OpenAI
+from openai import OpenAI
 
 # --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") 
 GOOGLE_CX = os.getenv("GOOGLE_CX")           
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # مفتاح Gemini
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # مفتاح OpenAI الجديد
 SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
 # --- متغيرات ثابتة ---
@@ -48,25 +47,26 @@ async def search_google_cse(session: ClientSession, query: str):
     data = await fetch_json(session, SEARCH_URL, params=params)
     
     results = []
-    # جلب جميع النتائج المتاحة بغض النظر عن الموقع، وسيتم تصفيتها بواسطة Gemini
-    for item in data.get("items", [])[:10]: # نأخذ أول 10 نتائج لنقدمها للذكاء الاصطناعي
+    # نأخذ أول 10 نتائج لنقدمها للذكاء الاصطناعي
+    for item in data.get("items", [])[:10]: 
         title = item.get("title")
         link = item.get("link")
         results.append({"title": title, "link": link})
 
     return results
 
-# --- دالة تحليل الروابط باستخدام Gemini ---
+# --- دالة تحليل الروابط باستخدام OpenAI (ChatGPT) ---
 async def analyze_search_results(query: str, results: list):
-    """تستخدم Gemini لتقييم الروابط وتصفية الأفضل للتحميل."""
+    """تستخدم OpenAI لتقييم الروابط وتصفية الأفضل للتحميل."""
     
-    if not GEMINI_API_KEY:
-        print("⚠️ مفتاح GEMINI_API_KEY مفقود. سيتم تخطي تحليل الذكاء الاصطناعي.")
+    if not OPENAI_API_KEY:
+        print("⚠️ مفتاح OPENAI_API_KEY مفقود. سيتم تخطي تحليل الذكاء الاصطناعي.")
+        # العودة للتصفية اليدوية كخيار احتياطي
         return [item for item in results if "kotobati.com" in item.get('link') or "noor-book.com" in item.get('link')][:5]
 
     try:
         # تهيئة العميل (يستخدم المفتاح من متغيرات البيئة تلقائياً)
-        client = genai.Client()
+        client = OpenAI()
         
         # تحويل قائمة النتائج إلى نص منظم
         results_text = "\n".join([f"Link {i+1}: {item.get('title')} | {item.get('link')}" for i, item in enumerate(results)])
@@ -88,17 +88,19 @@ async def analyze_search_results(query: str, results: list):
         {results_text}
         """
         
-        # استدعاء نموذج Gemini
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
+        # استدعاء نموذج OpenAI مع تفعيل استجابة JSON
+        response = client.chat.completions.create(
+            model='gpt-3.5-turbo-1106', # نموذج يدعم JSON
+            messages=[
+                {"role": "system", "content": "You are an expert filter that returns only a JSON list based on the user's prompt."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=1500
         )
 
         # تحليل استجابة JSON
-        filtered_list = json.loads(response.text)
+        filtered_list = json.loads(response.choices[0].message.content)
         
         # تصفية الروابط التي قال عنها النموذج "نعم"
         final_filtered_results = [
@@ -110,7 +112,7 @@ async def analyze_search_results(query: str, results: list):
         return final_filtered_results[:5]
 
     except Exception as e:
-        print(f"⚠️ فشل تحليل الذكاء الاصطناعي: {e}. العودة إلى التصفية اليدوية.")
+        print(f"⚠️ فشل تحليل OpenAI: {e}. العودة إلى التصفية اليدوية.")
         return [item for item in results if "kotobati.com" in item.get('link') or "noor-book.com" in item.get('link')][:5]
 
 
@@ -231,8 +233,8 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ لم أجد نتائج. حاول بكلمات مختلفة.")
             return
 
-        # 2. تحليل النتائج باستخدام Gemini لتصفيتها
-        await msg.edit_text("🧠 جاري تحليل النتائج باستخدام الذكاء الاصطناعي...")
+        # 2. تحليل النتائج باستخدام OpenAI لتصفيتها
+        await msg.edit_text("🧠 جاري تحليل النتائج باستخدام الذكاء الاصطناعي (ChatGPT)...")
         results = await analyze_search_results(query, initial_results)
         
         if not results:
