@@ -2,6 +2,7 @@ import os
 import asyncio
 import tempfile
 import aiofiles
+import json
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -9,10 +10,15 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from playwright.async_api import async_playwright 
 from urllib.parse import urljoin 
 
+# استيراد مكتبة Gemini AI
+from google import genai
+from google.genai import types
+
 # --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") 
 GOOGLE_CX = os.getenv("GOOGLE_CX")           
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # مفتاح Gemini
 SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
 # --- متغيرات ثابتة ---
@@ -42,32 +48,88 @@ async def search_google_cse(session: ClientSession, query: str):
     data = await fetch_json(session, SEARCH_URL, params=params)
     
     results = []
-    for item in data.get("items", [])[:5]:
+    # جلب جميع النتائج المتاحة بغض النظر عن الموقع، وسيتم تصفيتها بواسطة Gemini
+    for item in data.get("items", [])[:10]: # نأخذ أول 10 نتائج لنقدمها للذكاء الاصطناعي
         title = item.get("title")
         link = item.get("link")
-        
-        if "kotobati.com" in link or "noor-book.com" in link:
-             results.append({"title": title, "link": link})
+        results.append({"title": title, "link": link})
 
     return results
 
-# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (النسخة النهائية والمحسّنة) ---
+# --- دالة تحليل الروابط باستخدام Gemini ---
+async def analyze_search_results(query: str, results: list):
+    """تستخدم Gemini لتقييم الروابط وتصفية الأفضل للتحميل."""
+    
+    if not GEMINI_API_KEY:
+        print("⚠️ مفتاح GEMINI_API_KEY مفقود. سيتم تخطي تحليل الذكاء الاصطناعي.")
+        return [item for item in results if "kotobati.com" in item.get('link') or "noor-book.com" in item.get('link')][:5]
+
+    try:
+        # تهيئة العميل (يستخدم المفتاح من متغيرات البيئة تلقائياً)
+        client = genai.Client()
+        
+        # تحويل قائمة النتائج إلى نص منظم
+        results_text = "\n".join([f"Link {i+1}: {item.get('title')} | {item.get('link')}" for i, item in enumerate(results)])
+
+        # تعليمات النموذج
+        prompt = f"""
+        أنت خبير في البحث عن الكتب. طلب البحث الأصلي هو: "{query}".
+        حلل قائمة الروابط التالية. حدد الروابط التي من المرجح أن تكون ملفات PDF أو صفحات تحميل كتب مباشرة (مثل نور بوك أو كتباتي) وتجاهل الروابط الإعلانية أو روابط المدونات.
+        
+        أعد النتائج على شكل قائمة Python (JSON) فقط، بدون أي نص إضافي أو شرح. يجب أن تحتوي القائمة على 5 نتائج كحد أقصى. لكل نتيجة، يجب أن يكون هناك مفتاح "is_relevant" بقيمة "نعم" أو "لا".
+        
+        مثال على التنسيق المطلوب:
+        [
+            {{"title": "العنوان", "link": "الرابط", "is_relevant": "نعم"}},
+            ...
+        ]
+        
+        الروابط للتحليل:
+        {results_text}
+        """
+        
+        # استدعاء نموذج Gemini
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+
+        # تحليل استجابة JSON
+        filtered_list = json.loads(response.text)
+        
+        # تصفية الروابط التي قال عنها النموذج "نعم"
+        final_filtered_results = [
+            item for item in filtered_list 
+            if item.get('is_relevant', '').lower() == 'نعم'
+        ]
+        
+        # العودة بالروابط التي تمت تصفيتها فقط (5 نتائج كحد أقصى)
+        return final_filtered_results[:5]
+
+    except Exception as e:
+        print(f"⚠️ فشل تحليل الذكاء الاصطناعي: {e}. العودة إلى التصفية اليدوية.")
+        return [item for item in results if "kotobati.com" in item.get('link') or "noor-book.com" in item.get('link')][:5]
+
+
+# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (النسخة الأكثر موثوقية) ---
 async def get_pdf_link_from_page(link: str):
     """يستخدم Playwright لفتح الصفحة واستخلاص رابط PDF النهائي والمباشر."""
     pdf_link = None
-    page_title = "book" # قيمة افتراضية
+    page_title = "book" 
+    browser = None 
 
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
             
-            # الانتقال بانتظار تحميل الهيكل (domcontentloaded) وتمديد المهلة لـ 30 ثانية
+            # الانتقال بانتظار تحميل الهيكل (domcontentloaded)
             await page.goto(link, wait_until="domcontentloaded", timeout=30000) 
             
-            # جلب محتوى HTML
             html_content = await page.content()
-            await browser.close() 
 
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
@@ -76,11 +138,10 @@ async def get_pdf_link_from_page(link: str):
             if "noor-book.com" in link:
                 download_button = soup.select_one("a.book-dl-btn")
                 if download_button and download_button.get("href"):
-                    # نحصل على رابط إعادة التوجيه
                     href = download_button.get("href")
                     pdf_link = urljoin(link, href)
                     
-            # 2. الاستراتيجية العامة: البحث عن رابط مباشر (للمواقع الأخرى)
+            # 2. الاستراتيجية العامة: البحث عن رابط مباشر
             if not pdf_link:
                 for a in soup.select("a[href]"):
                     href = a["href"]
@@ -94,23 +155,23 @@ async def get_pdf_link_from_page(link: str):
         return pdf_link, page_title
     
     except Exception as e:
-        # تأكد من إغلاق المتصفح في حالة حدوث خطأ قبل الإغلاق
-        try:
-             await browser.close()
-        except:
-             pass
         raise e
+    
+    finally:
+        # ضمان إغلاق المتصفح في كل الأحوال
+        if browser:
+            await browser.close()
+            print("تم ضمان إغلاق متصفح Playwright.")
 
 
 # --- دالة التحميل والإرسال والحذف ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
-    """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب. يعالج إعادة التوجيه تلقائياً."""
+    """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
     
     async with ClientSession() as session:
-        # استخدام User-Agent لتجاوز حظر التحميل
-        # ClientSession يعالج إعادة التوجيه (Redirection) تلقائياً، وهذا مهم لروابط نور بوك
+        # ClientSession يعالج إعادة التوجيه (Redirection) تلقائياً
         async with session.get(pdf_url, headers=USER_AGENT_HEADER) as resp:
             if resp.status != 200:
                 await context.bot.send_message(
@@ -119,10 +180,8 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
                 )
                 return
             
-            # قراءة محتوى الاستجابة
             content = await resp.read()
 
-            # التحقق من حجم المحتوى (لمنع الملفات الفارغة/التالفة)
             if len(content) < MIN_PDF_SIZE_BYTES:
                 await context.bot.send_message(
                     chat_id=chat_id, 
@@ -130,13 +189,10 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
                 )
                 return
             
-            # كتابة الملف بشكل غير متزامن
             async with aiofiles.open(file_path, "wb") as f:
                 await f.write(content)
             
-            # إرسال الملف ومسحه
             try:
-                # إرسال الملف (يجب فتحه للقراءة الثنائية)
                 await context.bot.send_document(
                     chat_id=chat_id, 
                     document=open(file_path, "rb")
@@ -145,7 +201,6 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
             except Exception as e:
                  await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء إرسال الملف إلى تيليجرام: {e}")
             finally:
-                # ضمان حذف الملف من النظام بعد انتهاء محاولة الإرسال
                 if os.path.exists(file_path):
                     os.remove(file_path)
                     print(f"تم حذف الملف المؤقت: {file_path}")
@@ -154,7 +209,7 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
 
 async def start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 مرحبًا بك في بوت تحميل الكتب!\n"
+        "📚 مرحبًا بك في بوت تحميل الكتب الذكي!\n"
         "أرسل أمر /search متبوعًا باسم الكتاب أو المؤلف.\n\n"
         "مثال:\n/search قلعة العز"
     )
@@ -169,20 +224,29 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with ClientSession() as session:
-            results = await search_google_cse(session, query) 
+            # 1. جلب النتائج الأولية من Google CSE
+            initial_results = await search_google_cse(session, query) 
 
-        if not results:
+        if not initial_results:
             await msg.edit_text("❌ لم أجد نتائج. حاول بكلمات مختلفة.")
+            return
+
+        # 2. تحليل النتائج باستخدام Gemini لتصفيتها
+        await msg.edit_text("🧠 جاري تحليل النتائج باستخدام الذكاء الاصطناعي...")
+        results = await analyze_search_results(query, initial_results)
+        
+        if not results:
+            await msg.edit_text("❌ لم يجد الذكاء الاصطناعي أي رابط تحميل شرعي من بين النتائج. حاول بكلمات بحث أخرى.")
             return
 
         buttons = []
         text_lines = []
         
-        # حفظ قائمة الروابط الكاملة مؤقتاً لحل مشكلة Button_data_invalid
-        context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results[:5]]
+        # حفظ قائمة الروابط الكاملة التي تم تصفيتها
+        context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results]
         
-        # عرض أول 5 نتائج
-        for i, item in enumerate(results[:5], start=0):
+        # عرض النتائج التي تم تصفيتها
+        for i, item in enumerate(results, start=0):
             title = item.get("title")[:120]
             text_lines.append(f"{i+1}. {title}")
             buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
@@ -203,7 +267,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith("dl|"):
         try:
-            # استرجاع الرابط من context.user_data
             index_str = data.split("|", 1)[1]
             index = int(index_str)
             
@@ -248,7 +311,6 @@ def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing in environment variables.")
 
-    # ApplicationBuilder هو الجزء الذي يتطلب الإصدار 20+، وتم التأكد من تحديثه في Railway
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
