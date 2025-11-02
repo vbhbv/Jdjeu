@@ -6,7 +6,7 @@ from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
-from playwright.async_api import async_playwright, Error as PlaywrightError # استيراد PlaywrightError
+from playwright.async_api import async_playwright, Error as PlaywrightError 
 from urllib.parse import urljoin 
 
 # --- إعدادات Google CSE والمفاتيح ---
@@ -56,38 +56,22 @@ async def search_google_cse(session: ClientSession, query: str):
     return results
 
 
-# --- دالة استخلاص ثورية: التنصت على طلبات الشبكة ---
+# --- دالة استخلاص ثورية: التنصت على نوع MIME (الاستراتيجية النهائية) ---
 async def get_pdf_link_from_page(link: str):
     """
-    يستخدم Playwright لفتح الصفحة، ثم يتنصت على جميع طلبات الشبكة
-    للإمساك بطلب تحميل ملف PDF المباشر وتجاوز الحماية.
+    يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF
+    عن طريق فحص نوع MIME.
     """
     pdf_link = None
     page_title = "book" 
     browser = None 
     
-    PDF_KEYWORDS = ['.pdf', 'download', 'file', 'storage']
-
     try:
         async with async_playwright() as p:
             # تشغيل المتصفح بوضع التخفي
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            # --- 1. تفعيل التنصت على الشبكة (Start Listening) ---
-            pdf_url_container = {} 
-
-            def check_for_pdf_request(request):
-                """تفحص إذا كان الطلب يتضمن كلمة مفتاحية لملف PDF"""
-                url = request.url.lower()
-                # التحقق من أن الرابط يبدأ بـ http وأنه يحتوي على كلمات مفتاحية للـ PDF
-                if url.startswith('http') and any(kw in url for kw in PDF_KEYWORDS) and (url.endswith('.pdf') or 'pdf' in url):
-                    pdf_url_container['link'] = url
-                        
-            # ربط الفحص بجميع طلبات الشبكة الصادرة
-            page.on('request', check_for_pdf_request)
-            
-            # --- 2. الانتقال إلى الصفحة ---
             await page.goto(link, wait_until="domcontentloaded", timeout=30000) 
             
             html_content = await page.content()
@@ -97,22 +81,35 @@ async def get_pdf_link_from_page(link: str):
             # تحديد CSS Selector للزر الأكثر احتمالية
             download_selector = 'a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download")'
 
-            # الضغط على الزر لتشغيل طلب الشبكة (لتوليد الرابط المطلوب)
+            # --- التعديل الحاسم: وضع مؤشر انتظار الاستجابة حسب نوع MIME ---
+            # ننشئ مهمة (Task) تنتظر الاستجابة الشبكية التي نوعها 'application/pdf'
+            pdf_response_task = asyncio.create_task(
+                page.wait_for_response(
+                    # البحث عن استجابة ناجحة (200 أو 206) وتحمل ملف PDF (عبر فحص content-type)
+                    lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
+                    timeout=30000 # انتظار لمدة 30 ثانية
+                )
+            )
+
+            # --- الضغط على الزر لتوليد الطلب ---
             try:
                 # نستخدم click للضغط الفعلي
                 await page.click(download_selector, timeout=10000) 
             except PlaywrightError as click_e:
-                # هذا يعني أن الزر لم يظهر أو لم يمكن النقر عليه، ونحن نتوقع هذا الفشل
-                print(f"فشل الضغط التلقائي على الزر. جاري محاولة التقاط الطلب المباشر: {click_e}")
+                # فشل النقر متوقع في حال الحماية، ونعتمد على الانتظار النشط
+                print(f"فشل النقر التلقائي. نعتمد على الانتظار النشط فقط.")
                 
-            # --- 3. الانتظار لبرهة لالتقاط الطلب (10 ثواني) ---
-            await asyncio.sleep(10) 
-            
-            # --- 4. التحقق من الرابط الملتقط (الاستراتيجية الأساسية) ---
-            if 'link' in pdf_url_container:
-                pdf_link = pdf_url_container['link']
-            
-            # --- 5. الاستخلاص المباشر من HTML (الاستراتيجية الاحتياطية) ---
+            # --- انتظار المهمة لتعود بالاستجابة ---
+            try:
+                # ننتظر حتى تعود المهمة بالاستجابة (قد تستغرق حتى 30 ثانية)
+                pdf_response = await asyncio.wait_for(pdf_response_task, timeout=35) 
+                pdf_link = pdf_response.url
+            except asyncio.TimeoutError:
+                print("انتهت مهلة الانتظار لطلب PDF (لم يتم رصد استجابة PDF).")
+            except Exception as e:
+                print(f"خطأ أثناء انتظار استجابة PDF: {e}")
+
+            # --- الاستخلاص الاحتياطي من HTML (في حال عدم النقر) ---
             if not pdf_link:
                 # محاولة أخيرة للبحث عن روابط .pdf مباشرة موجودة بالفعل في الكود المصدر
                 for a in soup.select("a[href]"):
@@ -127,7 +124,6 @@ async def get_pdf_link_from_page(link: str):
         raise e
     
     finally:
-        # ضمان إغلاق المتصفح في كل الأحوال
         if browser:
             await browser.close()
             print("تم ضمان إغلاق متصفح Playwright.")
@@ -272,7 +268,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"📄 فشل جلب رابط التحميل المباشر بعد محاولة التنصت. هذا هو المصدر:\n{link}",
+                    text=f"📄 فشل جلب رابط التحميل المباشر بعد محاولة التنصت على نوع المحتوى. هذا هو المصدر:\n{link}",
                 )
         
         except Exception as e:
