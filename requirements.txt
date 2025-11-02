@@ -3,4 +3,3 @@ aiohttp
 aiofiles
 beautifulsoup4
 playwright 
-google-genai
