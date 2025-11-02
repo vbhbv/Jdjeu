@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright 
-from urllib.parse import urljoin # تم إضافته هنا لتجنب الاستدعاء داخل حلقة
+from urllib.parse import urljoin 
 
 # --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -51,40 +51,47 @@ async def search_google_cse(session: ClientSession, query: str):
 
     return results
 
-# --- دالة مساعدة جديدة لاستخلاص رابط PDF باستخدام Playwright (الحل ضد الملف الفارغ) ---
+# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (تم تعديل المهلة) ---
 async def get_pdf_link_from_page(link: str):
     """يستخدم Playwright لفتح الصفحة وتشغيل JavaScript واستخلاص رابط PDF النهائي."""
     pdf_link = None
     
-    async with async_playwright() as p:
-        # استخدام متصفح Chrome وهمي
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
+    try:
+        async with async_playwright() as p:
+            # استخدام متصفح Chrome وهمي
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            
+            # الانتقال إلى رابط الكتاب وانتظار تحميل الشبكة بالكامل
+            # *** التعديل الحاسم: تم تمديد المهلة إلى 60 ثانية (60000ms) ***
+            await page.goto(link, wait_until="networkidle", timeout=60000) 
+            
+            # جلب محتوى HTML بعد تشغيل JavaScript
+            html_content = await page.content()
+            
+            # إغلاق المتصفح الوهمي
+            await browser.close()
+            
+            # تحليل المحتوى الذي جلبه Playwright
+            soup = BeautifulSoup(html_content, "html.parser")
+            
+            # البحث عن رابط PDF مباشر
+            for a in soup.select("a[href]"):
+                href = a["href"]
+                if href.lower().endswith(".pdf") or "download" in href.lower():
+                    # حل مشكلة الروابط النسبية
+                    if href.startswith("/"):
+                        pdf_link = urljoin(link, href)
+                    else:
+                        pdf_link = href
+                    break 
         
-        # الانتقال إلى رابط الكتاب وانتظار تحميل الشبكة بالكامل
-        await page.goto(link, wait_until="networkidle") 
-        
-        # جلب محتوى HTML بعد تشغيل JavaScript
-        html_content = await page.content()
-        
-        # إغلاق المتصفح الوهمي
-        await browser.close()
-        
-        # تحليل المحتوى الذي جلبه Playwright
-        soup = BeautifulSoup(html_content, "html.parser")
-        
-        # البحث عن رابط PDF مباشر
-        for a in soup.select("a[href]"):
-            href = a["href"]
-            if href.lower().endswith(".pdf") or "download" in href.lower():
-                # حل مشكلة الروابط النسبية
-                if href.startswith("/"):
-                    pdf_link = urljoin(link, href)
-                else:
-                    pdf_link = href
-                break 
+        return pdf_link, soup.title.string
     
-    return pdf_link, soup.title.string
+    except Exception as e:
+        # إعادة توجيه الاستثناء للسماح لـ callback_handler بمعالجته
+        raise e
+
 
 # --- دالة التحميل والإرسال والحذف ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
@@ -152,7 +159,7 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         async with ClientSession() as session:
-            results = await search_google_cse(session, query) # تم التأكد من وجود الدالة
+            results = await search_google_cse(session, query) 
 
         if not results:
             await msg.edit_text("❌ لم أجد نتائج. حاول بكلمات مختلفة.")
@@ -220,6 +227,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
                 )
         
+        # هذا الاستثناء سيشمل خطأ الـ Timeout الآن
         except Exception as e:
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
