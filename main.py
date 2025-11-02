@@ -6,7 +6,7 @@ from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
-from playwright.async_api import async_playwright 
+from playwright.async_api import async_playwright, Error as PlaywrightError # استيراد PlaywrightError
 from urllib.parse import urljoin 
 
 # --- إعدادات Google CSE والمفاتيح ---
@@ -48,7 +48,6 @@ async def search_google_cse(session: ClientSession, query: str):
     data = await fetch_json(session, SEARCH_URL, params=params)
     
     results = []
-    # جلب أول 10 نتائج لنتمكن من التصفية لاحقًا
     for item in data.get("items", [])[:10]: 
         title = item.get("title")
         link = item.get("link")
@@ -57,53 +56,72 @@ async def search_google_cse(session: ClientSession, query: str):
     return results
 
 
-# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (النسخة الأكثر موثوقية) ---
+# --- دالة استخلاص ثورية: التنصت على طلبات الشبكة ---
 async def get_pdf_link_from_page(link: str):
-    """يستخدم Playwright لفتح الصفحة واستخلاص رابط PDF النهائي والمباشر."""
+    """
+    يستخدم Playwright لفتح الصفحة، ثم يتنصت على جميع طلبات الشبكة
+    للإمساك بطلب تحميل ملف PDF المباشر وتجاوز الحماية.
+    """
     pdf_link = None
     page_title = "book" 
     browser = None 
+    
+    PDF_KEYWORDS = ['.pdf', 'download', 'file', 'storage']
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch()
+            # تشغيل المتصفح بوضع التخفي
+            browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            # الانتقال بانتظار تحميل الهيكل (domcontentloaded)
+            # --- 1. تفعيل التنصت على الشبكة (Start Listening) ---
+            pdf_url_container = {} 
+
+            def check_for_pdf_request(request):
+                """تفحص إذا كان الطلب يتضمن كلمة مفتاحية لملف PDF"""
+                url = request.url.lower()
+                # التحقق من أن الرابط يبدأ بـ http وأنه يحتوي على كلمات مفتاحية للـ PDF
+                if url.startswith('http') and any(kw in url for kw in PDF_KEYWORDS) and (url.endswith('.pdf') or 'pdf' in url):
+                    pdf_url_container['link'] = url
+                        
+            # ربط الفحص بجميع طلبات الشبكة الصادرة
+            page.on('request', check_for_pdf_request)
+            
+            # --- 2. الانتقال إلى الصفحة ---
             await page.goto(link, wait_until="domcontentloaded", timeout=30000) 
             
             html_content = await page.content()
-
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
-            # 1. الاستراتيجية الخاصة بنور بوك: البحث عن زر التحميل (book-dl-btn)
-            if "noor-book.com" in link:
-                download_button = soup.select_one("a.book-dl-btn")
-                if download_button and download_button.get("href"):
-                    href = download_button.get("href")
-                    pdf_link = urljoin(link, href)
-                    
-            # 2. الاستراتيجية الخاصة بكتباتي: البحث عن زر تحميل الكتاب (btn-download)
-            if not pdf_link and "kotobati.com" in link:
-                download_button = soup.find('a', class_='btn-download')
-                if download_button and download_button.get("href"):
-                    href = download_button.get("href")
-                    pdf_link = urljoin(link, href)
+            # تحديد CSS Selector للزر الأكثر احتمالية
+            download_selector = 'a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download")'
 
-            # 3. الاستراتيجية العامة: البحث عن رابط مباشر (يغطي masaha.org و books-library.net وغيرهما)
+            # الضغط على الزر لتشغيل طلب الشبكة (لتوليد الرابط المطلوب)
+            try:
+                # نستخدم click للضغط الفعلي
+                await page.click(download_selector, timeout=10000) 
+            except PlaywrightError as click_e:
+                # هذا يعني أن الزر لم يظهر أو لم يمكن النقر عليه، ونحن نتوقع هذا الفشل
+                print(f"فشل الضغط التلقائي على الزر. جاري محاولة التقاط الطلب المباشر: {click_e}")
+                
+            # --- 3. الانتظار لبرهة لالتقاط الطلب (10 ثواني) ---
+            await asyncio.sleep(10) 
+            
+            # --- 4. التحقق من الرابط الملتقط (الاستراتيجية الأساسية) ---
+            if 'link' in pdf_url_container:
+                pdf_link = pdf_url_container['link']
+            
+            # --- 5. الاستخلاص المباشر من HTML (الاستراتيجية الاحتياطية) ---
             if not pdf_link:
+                # محاولة أخيرة للبحث عن روابط .pdf مباشرة موجودة بالفعل في الكود المصدر
                 for a in soup.select("a[href]"):
                     href = a["href"]
-                    # البحث عن الروابط المنتهية بـ .pdf أو التي تحتوي على كلمة "download"
-                    if href.lower().endswith(".pdf") or "download" in href.lower():
-                        if href.startswith("/"):
-                            pdf_link = urljoin(link, href)
-                        else:
-                            pdf_link = href
-                        break 
-            
-        return pdf_link, page_title
+                    if href.lower().endswith(".pdf"): 
+                        pdf_link = urljoin(link, href)
+                        break
+
+            return pdf_link, page_title
     
     except Exception as e:
         raise e
@@ -144,10 +162,12 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
                 await f.write(content)
             
             try:
-                await context.bot.send_document(
-                    chat_id=chat_id, 
-                    document=open(file_path, "rb")
-                )
+                # إرسال الملف
+                with open(file_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=chat_id, 
+                        document=f
+                    )
                 await context.bot.send_message(chat_id=chat_id, text="✅ تم إرسال الكتاب بنجاح.")
             except Exception as e:
                  await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء إرسال الملف إلى تيليجرام: {e}")
@@ -241,9 +261,9 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
             
-        await query.edit_message_text("⏳ أستخدم متصفح وهمي لجلب رابط الملف النهائي...")
+        await query.edit_message_text("⏳ أستخدم متصفح وهمي بجهاز التنصت لفك رابط الملف النهائي...")
         
-        # --- استدعاء الدالة المنفصلة ---
+        # --- استدعاء الدالة الثورية ---
         try:
             pdf_link, title = await get_pdf_link_from_page(link)
             
@@ -252,7 +272,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
-                    text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
+                    text=f"📄 فشل جلب رابط التحميل المباشر بعد محاولة التنصت. هذا هو المصدر:\n{link}",
                 )
         
         except Exception as e:
