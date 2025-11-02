@@ -51,56 +51,66 @@ async def search_google_cse(session: ClientSession, query: str):
 
     return results
 
-# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (التعديل الأخير) ---
+# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (النسخة النهائية والمحسّنة) ---
 async def get_pdf_link_from_page(link: str):
-    """يستخدم Playwright لفتح الصفحة وتشغيل JavaScript واستخلاص رابط PDF النهائي."""
+    """يستخدم Playwright لفتح الصفحة واستخلاص رابط PDF النهائي والمباشر."""
     pdf_link = None
-    
+    page_title = "book" # قيمة افتراضية
+
     try:
         async with async_playwright() as p:
-            # استخدام متصفح Chrome وهمي
             browser = await p.chromium.launch()
             page = await browser.new_page()
             
-            # الانتقال إلى رابط الكتاب وانتظار تحميل هيكل الصفحة
-            # *** تم تغيير wait_until إلى domcontentloaded وإعادة المهلة إلى 30 ثانية ***
+            # الانتقال بانتظار تحميل الهيكل (domcontentloaded) وتمديد المهلة لـ 30 ثانية
             await page.goto(link, wait_until="domcontentloaded", timeout=30000) 
             
-            # جلب محتوى HTML بعد تشغيل JavaScript
+            # جلب محتوى HTML
             html_content = await page.content()
-            
-            # إغلاق المتصفح الوهمي
-            await browser.close()
-            
-            # تحليل المحتوى الذي جلبه Playwright
+            await browser.close() 
+
             soup = BeautifulSoup(html_content, "html.parser")
+            page_title = soup.title.string if soup.title else "book"
             
-            # البحث عن رابط PDF مباشر
-            for a in soup.select("a[href]"):
-                href = a["href"]
-                if href.lower().endswith(".pdf") or "download" in href.lower():
-                    # حل مشكلة الروابط النسبية
-                    if href.startswith("/"):
-                        pdf_link = urljoin(link, href)
-                    else:
-                        pdf_link = href
-                    break 
-        
-        return pdf_link, soup.title.string
+            # 1. الاستراتيجية الخاصة بنور بوك: البحث عن زر التحميل (book-dl-btn)
+            if "noor-book.com" in link:
+                download_button = soup.select_one("a.book-dl-btn")
+                if download_button and download_button.get("href"):
+                    # نحصل على رابط إعادة التوجيه
+                    href = download_button.get("href")
+                    pdf_link = urljoin(link, href)
+                    
+            # 2. الاستراتيجية العامة: البحث عن رابط مباشر (للمواقع الأخرى)
+            if not pdf_link:
+                for a in soup.select("a[href]"):
+                    href = a["href"]
+                    if href.lower().endswith(".pdf") or "download" in href.lower():
+                        if href.startswith("/"):
+                            pdf_link = urljoin(link, href)
+                        else:
+                            pdf_link = href
+                        break 
+            
+        return pdf_link, page_title
     
     except Exception as e:
-        # إعادة توجيه الاستثناء للسماح لـ callback_handler بمعالجته
+        # تأكد من إغلاق المتصفح في حالة حدوث خطأ قبل الإغلاق
+        try:
+             await browser.close()
+        except:
+             pass
         raise e
 
 
 # --- دالة التحميل والإرسال والحذف ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
-    """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
+    """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب. يعالج إعادة التوجيه تلقائياً."""
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
     
     async with ClientSession() as session:
         # استخدام User-Agent لتجاوز حظر التحميل
+        # ClientSession يعالج إعادة التوجيه (Redirection) تلقائياً، وهذا مهم لروابط نور بوك
         async with session.get(pdf_url, headers=USER_AGENT_HEADER) as resp:
             if resp.status != 200:
                 await context.bot.send_message(
@@ -238,6 +248,7 @@ def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing in environment variables.")
 
+    # ApplicationBuilder هو الجزء الذي يتطلب الإصدار 20+، وتم التأكد من تحديثه في Railway
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
