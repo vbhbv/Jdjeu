@@ -1,17 +1,17 @@
-# استخدام صورة بايثون أساسية تدعم Playwright (buster-slim)
-FROM mcr.microsoft.com/playwright/python:v1.46.0-buster-slim
+# Use an official Python runtime as a parent image
+FROM python:3.9-slim
 
-# تعيين دليل العمل
-WORKDIR /app
+# Set the working directory in the container
+WORKDIR /usr/src/app
 
-# نسخ ملف متطلبات المكتبات
-COPY requirements.txt .
-
-# تثبيت متطلبات بايثون
-RUN pip install --no-cache-dir -r requirements.txt
-
-# نسخ الكود المتبقي
+# Copy the current directory contents into the container at /usr/src/app
 COPY . .
 
-# أمر التشغيل النهائي
-CMD ["python", "main.py"]
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Make port 80 available to the world outside this container
+EXPOSE 80
+
+# Run the application when the container launches
+CMD ["python", "app.py"]
