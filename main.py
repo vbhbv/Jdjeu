@@ -51,7 +51,7 @@ async def search_google_cse(session: ClientSession, query: str):
 
     return results
 
-# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (تم تعديل المهلة) ---
+# --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (التعديل الأخير) ---
 async def get_pdf_link_from_page(link: str):
     """يستخدم Playwright لفتح الصفحة وتشغيل JavaScript واستخلاص رابط PDF النهائي."""
     pdf_link = None
@@ -62,9 +62,9 @@ async def get_pdf_link_from_page(link: str):
             browser = await p.chromium.launch()
             page = await browser.new_page()
             
-            # الانتقال إلى رابط الكتاب وانتظار تحميل الشبكة بالكامل
-            # *** التعديل الحاسم: تم تمديد المهلة إلى 60 ثانية (60000ms) ***
-            await page.goto(link, wait_until="networkidle", timeout=60000) 
+            # الانتقال إلى رابط الكتاب وانتظار تحميل هيكل الصفحة
+            # *** تم تغيير wait_until إلى domcontentloaded وإعادة المهلة إلى 30 ثانية ***
+            await page.goto(link, wait_until="domcontentloaded", timeout=30000) 
             
             # جلب محتوى HTML بعد تشغيل JavaScript
             html_content = await page.content()
@@ -227,7 +227,6 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"📄 لم أجد رابط PDF مباشر. هذا هو المصدر:\n{link}",
                 )
         
-        # هذا الاستثناء سيشمل خطأ الـ Timeout الآن
         except Exception as e:
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
