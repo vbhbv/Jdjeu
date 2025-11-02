@@ -2,7 +2,6 @@ import os
 import asyncio
 import tempfile
 import aiofiles
-import json
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,20 +9,22 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from playwright.async_api import async_playwright 
 from urllib.parse import urljoin 
 
-# استيراد مكتبة OpenAI
-from openai import OpenAI
-
 # --- إعدادات Google CSE والمفاتيح ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") 
 GOOGLE_CX = os.getenv("GOOGLE_CX")           
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # مفتاح OpenAI الجديد
 SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
 
 # --- متغيرات ثابتة ---
 USER_AGENT_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 MIN_PDF_SIZE_BYTES = 50 * 1024 # 50 كيلوبايت كحد أدنى للملف
 TEMP_LINKS_KEY = "current_search_links" 
+TRUSTED_DOMAINS = [
+    "noor-book.com", 
+    "kotobati.com", 
+    "masaha.org", 
+    "books-library.net"
+]
 
 # --- دوال مساعدة للشبكة (Utility Functions) ---
 
@@ -47,73 +48,13 @@ async def search_google_cse(session: ClientSession, query: str):
     data = await fetch_json(session, SEARCH_URL, params=params)
     
     results = []
-    # نأخذ أول 10 نتائج لنقدمها للذكاء الاصطناعي
+    # جلب أول 10 نتائج لنتمكن من التصفية لاحقًا
     for item in data.get("items", [])[:10]: 
         title = item.get("title")
         link = item.get("link")
         results.append({"title": title, "link": link})
 
     return results
-
-# --- دالة تحليل الروابط باستخدام OpenAI (ChatGPT) ---
-async def analyze_search_results(query: str, results: list):
-    """تستخدم OpenAI لتقييم الروابط وتصفية الأفضل للتحميل."""
-    
-    if not OPENAI_API_KEY:
-        print("⚠️ مفتاح OPENAI_API_KEY مفقود. سيتم تخطي تحليل الذكاء الاصطناعي.")
-        # العودة للتصفية اليدوية كخيار احتياطي
-        return [item for item in results if "kotobati.com" in item.get('link') or "noor-book.com" in item.get('link')][:5]
-
-    try:
-        # تهيئة العميل (يستخدم المفتاح من متغيرات البيئة تلقائياً)
-        client = OpenAI()
-        
-        # تحويل قائمة النتائج إلى نص منظم
-        results_text = "\n".join([f"Link {i+1}: {item.get('title')} | {item.get('link')}" for i, item in enumerate(results)])
-
-        # تعليمات النموذج
-        prompt = f"""
-        أنت خبير في البحث عن الكتب. طلب البحث الأصلي هو: "{query}".
-        حلل قائمة الروابط التالية. حدد الروابط التي من المرجح أن تكون ملفات PDF أو صفحات تحميل كتب مباشرة (مثل نور بوك أو كتباتي) وتجاهل الروابط الإعلانية أو روابط المدونات.
-        
-        أعد النتائج على شكل قائمة Python (JSON) فقط، بدون أي نص إضافي أو شرح. يجب أن تحتوي القائمة على 5 نتائج كحد أقصى. لكل نتيجة، يجب أن يكون هناك مفتاح "is_relevant" بقيمة "نعم" أو "لا".
-        
-        مثال على التنسيق المطلوب:
-        [
-            {{"title": "العنوان", "link": "الرابط", "is_relevant": "نعم"}},
-            ...
-        ]
-        
-        الروابط للتحليل:
-        {results_text}
-        """
-        
-        # استدعاء نموذج OpenAI مع تفعيل استجابة JSON
-        response = client.chat.completions.create(
-            model='gpt-3.5-turbo-1106', # نموذج يدعم JSON
-            messages=[
-                {"role": "system", "content": "You are an expert filter that returns only a JSON list based on the user's prompt."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            max_tokens=1500
-        )
-
-        # تحليل استجابة JSON
-        filtered_list = json.loads(response.choices[0].message.content)
-        
-        # تصفية الروابط التي قال عنها النموذج "نعم"
-        final_filtered_results = [
-            item for item in filtered_list 
-            if item.get('is_relevant', '').lower() == 'نعم'
-        ]
-        
-        # العودة بالروابط التي تمت تصفيتها فقط (5 نتائج كحد أقصى)
-        return final_filtered_results[:5]
-
-    except Exception as e:
-        print(f"⚠️ فشل تحليل OpenAI: {e}. العودة إلى التصفية اليدوية.")
-        return [item for item in results if "kotobati.com" in item.get('link') or "noor-book.com" in item.get('link')][:5]
 
 
 # --- دالة مساعدة لاستخلاص رابط PDF باستخدام Playwright (النسخة الأكثر موثوقية) ---
@@ -143,10 +84,18 @@ async def get_pdf_link_from_page(link: str):
                     href = download_button.get("href")
                     pdf_link = urljoin(link, href)
                     
-            # 2. الاستراتيجية العامة: البحث عن رابط مباشر
+            # 2. الاستراتيجية الخاصة بكتباتي: البحث عن زر تحميل الكتاب (btn-download)
+            if not pdf_link and "kotobati.com" in link:
+                download_button = soup.find('a', class_='btn-download')
+                if download_button and download_button.get("href"):
+                    href = download_button.get("href")
+                    pdf_link = urljoin(link, href)
+
+            # 3. الاستراتيجية العامة: البحث عن رابط مباشر (يغطي masaha.org و books-library.net وغيرهما)
             if not pdf_link:
                 for a in soup.select("a[href]"):
                     href = a["href"]
+                    # البحث عن الروابط المنتهية بـ .pdf أو التي تحتوي على كلمة "download"
                     if href.lower().endswith(".pdf") or "download" in href.lower():
                         if href.startswith("/"):
                             pdf_link = urljoin(link, href)
@@ -211,7 +160,7 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
 
 async def start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 مرحبًا بك في بوت تحميل الكتب الذكي!\n"
+        "📚 مرحبًا بك في بوت تحميل الكتب!\n"
         "أرسل أمر /search متبوعًا باسم الكتاب أو المؤلف.\n\n"
         "مثال:\n/search قلعة العز"
     )
@@ -233,12 +182,14 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ لم أجد نتائج. حاول بكلمات مختلفة.")
             return
 
-        # 2. تحليل النتائج باستخدام OpenAI لتصفيتها
-        await msg.edit_text("🧠 جاري تحليل النتائج باستخدام الذكاء الاصطناعي (ChatGPT)...")
-        results = await analyze_search_results(query, initial_results)
+        # 2. التصفية اليدوية: قبول الروابط من النطاقات الموثوقة فقط
+        results = [
+            item for item in initial_results 
+            if any(domain in item.get('link') for domain in TRUSTED_DOMAINS)
+        ][:5]
         
         if not results:
-            await msg.edit_text("❌ لم يجد الذكاء الاصطناعي أي رابط تحميل شرعي من بين النتائج. حاول بكلمات بحث أخرى.")
+            await msg.edit_text("❌ لم أجد أي رابط تحميل مباشر موثوق (من المكتبات المعتمدة). حاول بكلمات بحث أخرى.")
             return
 
         buttons = []
@@ -250,7 +201,9 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         # عرض النتائج التي تم تصفيتها
         for i, item in enumerate(results, start=0):
             title = item.get("title")[:120]
-            text_lines.append(f"{i+1}. {title}")
+            # تحديد اسم المكتبة لمساعدة المستخدم في الاختيار
+            source = next((d.replace('.com', '').replace('.net', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "مصدر خارجي")
+            text_lines.append(f"{i+1}. {title} (المصدر: {source})")
             buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
             
         reply = "\n".join(text_lines)
